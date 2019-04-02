@@ -1,0 +1,82 @@
+# coding=utf-8
+
+import time
+
+from pynacos.failover.localconfigInfoprocessor import LocalConfigInfoProcessor
+from pynacos.request.config.deleteconfigrequest import DeleteConfigRequest
+from pynacos.request.config.getconfigrequest import GetConfigRequest
+from pynacos.request.config.listenerconfigrequest import ListenerConfigRequest
+from pynacos.request.config.publishconfigrequest import PublishConfigRequest
+from pynacos.util import log
+from pynacos.util import md5
+
+
+class NacosClient():
+    @staticmethod
+    def get(env, data_id, group, tenant):
+        get_config_request = GetConfigRequest()
+        get_config_request.group = group
+        get_config_request.dataId = data_id
+        get_config_request.tenant = tenant
+        try:
+            response = get_config_request.do_request()
+            config = response.content
+            LocalConfigInfoProcessor.save_snapshot(env, data_id, group, tenant, config)
+        except Exception, e:
+            log.error("获取配置异常，开始从本地获取配置, message: " + str(e))
+            config = LocalConfigInfoProcessor.get_failover(env, data_id, group, tenant)
+            config = config if config else LocalConfigInfoProcessor.get_snapshot(env, data_id, group, tenant)
+
+        return config
+
+    @staticmethod
+    def listener(env, data_id, group, config, tenant=""):
+        loop = 0
+        while True:
+            loop = loop + 1
+            listener_config_request = ListenerConfigRequest()
+            listener_config_request.group = group
+            listener_config_request.dataId = data_id
+            listener_config_request.tenant = tenant
+            listener_config_request.contentMD5 = md5.md5(config)
+
+            try:
+                response = listener_config_request.do_request()
+                if (response.content):
+                    # 配置发生了变化
+                    config = NacosClient.get(env, data_id, group, tenant)
+
+                    log.info("found changed config: " + config)
+
+                    # 保存最新的配置
+                    LocalConfigInfoProcessor.save_snapshot(env, data_id, group, tenant, config)
+            except Exception, e:
+                log.error("listener请求异常, e: " + str(e))
+                # sleep 500 milliseconds
+                # 短暂休息会儿
+                time.sleep(0.5)
+            log.info("listener loop count: " + loop)
+
+    @staticmethod
+    def publish(dataId, group, content, tenant=""):
+        publish_config_request = PublishConfigRequest()
+        publish_config_request.group = group
+        publish_config_request.dataId = dataId
+        publish_config_request.tenant = tenant
+        publish_config_request.content = content
+
+        try:
+            response = publish_config_request.do_request()
+        except:
+            return False
+        return response.content == 'true'
+
+    @staticmethod
+    def delete(data_id, group, tenant):
+        delete_config_request = DeleteConfigRequest()
+        delete_config_request.group = group
+        delete_config_request.dataId = data_id
+        delete_config_request.tenant = tenant
+
+        response = delete_config_request.do_request()
+        return response.content == 'true'
